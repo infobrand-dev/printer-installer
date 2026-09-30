@@ -15,12 +15,15 @@ $ProgressPreference    = 'SilentlyContinue'   # download jauh lebih cepat di Pow
 $ScriptUrl   = 'https://infobrand.id/r/_printer'   # dipakai saat relaunch sebagai Administrator
 $ServerUrl   = 'https://raw.githubusercontent.com/infobrand-dev/printer-installer/main'   # lokasi folder drivers/
 $PrinterName = 'Printer Canon Wavlink'
-$DefaultIP   = '192.168.1.55'
+$DefaultIP   = '192.168.0.222'
 $RawPort     = 9100
 # Folder = nama folder di Canon_Driver, Zip = nama file di $ServerUrl/drivers/
+# Sha256 = hash zip; WAJIB diperbarui setiap kali zip driver diganti (Get-FileHash drivers\*.zip)
 $Models = @(
-    @{ Name = 'Canon G1010 series'; Folder = 'g10106.inf_amd64_4f0db5b99c6a3d48';  Zip = 'G1010.zip' },
-    @{ Name = 'Canon G2020 series'; Folder = 'g2020p6.inf_amd64_b440bf34c56299f8'; Zip = 'G2020.zip' }
+    @{ Name = 'Canon G1010 series'; Folder = 'g10106.inf_amd64_4f0db5b99c6a3d48';  Zip = 'G1010.zip'
+       Sha256 = 'EAE5697CAECD463C8F086C69D6EB576671CD3B5A8C7D34E5C3299FD1E9CB06C2' },
+    @{ Name = 'Canon G2020 series'; Folder = 'g2020p6.inf_amd64_b440bf34c56299f8'; Zip = 'G2020.zip'
+       Sha256 = '457393783D06F30818C11CD539AE76981825CC123656E87168217AC0DE884BA0' }
 )
 # ---------------------------------------------
 
@@ -64,15 +67,23 @@ function Get-DriverPath($entry) {
         if (Test-Path $local) { return $local }
     }
 
-    $work = Join-Path $env:TEMP 'CanonPrinterDriver'
+    # Folder baru bernama acak per unduhan, supaya tidak bisa disiapkan/ditimpa proses lain lebih dulu
+    $work = Join-Path $env:TEMP ('CanonPrinterDriver_' + [guid]::NewGuid().ToString('N'))
     $zip  = Join-Path $work $entry.Zip
-    $dest = Join-Path $work ([IO.Path]::GetFileNameWithoutExtension($entry.Zip))
-    New-Item -ItemType Directory -Force $work | Out-Null
+    $dest = Join-Path $work 'driver'
+    New-Item -ItemType Directory $work | Out-Null
 
     Write-Host "Mengunduh driver $($entry.Zip) dari $ServerUrl ..."
     Invoke-WebRequest -Uri "$ServerUrl/drivers/$($entry.Zip)" -OutFile $zip -UseBasicParsing
-    if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
-    Expand-Archive -Path $zip -DestinationPath $dest -Force
+
+    $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+    if ($hash -ne $entry.Sha256) {
+        Remove-Item -Recurse -Force $work
+        throw "Hash file $($entry.Zip) tidak cocok (file rusak atau sudah diubah). Instalasi dibatalkan."
+    }
+    Write-Ok 'File driver terverifikasi (SHA256).'
+
+    Expand-Archive -Path $zip -DestinationPath $dest
     Remove-Item -Force $zip
     return $dest
 }
@@ -80,8 +91,31 @@ function Get-DriverPath($entry) {
 function Show-Printers {
     $list = @(Get-Printer | Sort-Object Name)
     if ($list.Count -eq 0) { Write-Host '(Tidak ada printer terpasang)'; return @() }
+    $ports = @{}
+    Get-PrinterPort -ErrorAction SilentlyContinue | ForEach-Object { $ports[$_.Name] = $_ }
+    $defaultName = (Get-CimInstance Win32_Printer -Filter 'Default=TRUE' -ErrorAction SilentlyContinue).Name
+
     for ($i = 0; $i -lt $list.Count; $i++) {
-        "{0,3}. {1}  [driver: {2}] [port: {3}]" -f ($i + 1), $list[$i].Name, $list[$i].DriverName, $list[$i].PortName | Write-Host
+        $p = $list[$i]
+        $port = $ports[$p.PortName]
+        $hostAddr = if ($port) { if ($port.PrinterHostAddress) { $port.PrinterHostAddress } else { $port.PrinterHostIP } }
+
+        if ($hostAddr) {
+            $conn = "Jaringan  IP $hostAddr : $($port.PortNumber)"
+        } elseif ($p.PortName -like 'USB*') {
+            $conn = 'USB'
+        } elseif ($p.PortName -like 'WSD*') {
+            $conn = 'Jaringan (WSD, auto-detect)'
+        } else {
+            $conn = 'Lainnya'
+        }
+
+        $title = "{0,3}. {1}" -f ($i + 1), $p.Name
+        if ($p.Name -eq $defaultName) { Write-Host "$title  (DEFAULT)" -ForegroundColor Green } else { Write-Host $title }
+        Write-Host "       Model   : $($p.DriverName)"
+        Write-Host "       Koneksi : $conn"
+        Write-Host "       Port    : $($p.PortName)"
+        Write-Host "       Status  : $($p.PrinterStatus)"
     }
     return $list
 }
