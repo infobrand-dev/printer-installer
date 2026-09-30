@@ -182,7 +182,14 @@ function Install-CanonPrinter {
     if (Get-Printer -Name $PrinterName -ErrorAction SilentlyContinue) {
         Write-Warn "Printer '$PrinterName' sudah ada."
         if (-not (Confirm-YesNo 'Ganti dengan yang baru?')) { return }
-        Remove-PrinterSafe $PrinterName -KeepPort:$true
+        # Bisa saja printer lama baru selesai terhapus saat user menjawab, jadi cek ulang
+        if (Get-Printer -Name $PrinterName -ErrorAction SilentlyContinue) {
+            Remove-PrinterSafe $PrinterName -KeepPort:$true
+        }
+        if (Get-Printer -Name $PrinterName -ErrorAction SilentlyContinue) {
+            Write-Err "Printer lama '$PrinterName' masih belum bisa dihapus Windows. Restart PC lalu coba lagi."
+            return
+        }
     }
     try {
         Add-Printer -Name $PrinterName -DriverName $model -PortName $portName
@@ -204,6 +211,24 @@ function Install-CanonPrinter {
     }
 }
 
+# Remove-Printer tidak langsung menghilangkan printer: jika masih ada job atau printer sedang dibuka
+# aplikasi lain (mis. jendela antrean cetak), Windows menandainya "pending deletion" dan printer
+# tetap muncul di Get-Printer. Tunggu sebentar; jika masih ada, restart Print Spooler agar tuntas.
+function Wait-PrinterGone([string]$Name) {
+    for ($i = 0; $i -lt 10; $i++) {
+        if (-not (Get-Printer -Name $Name -ErrorAction SilentlyContinue)) { return $true }
+        Start-Sleep -Milliseconds 500
+    }
+
+    Write-Warn 'Windows masih memproses penghapusan, me-restart Print Spooler...'
+    try { Restart-Service -Name Spooler -Force } catch { Write-Warn "Gagal restart Print Spooler: $($_.Exception.Message)" }
+    for ($i = 0; $i -lt 10; $i++) {
+        if (-not (Get-Printer -Name $Name -ErrorAction SilentlyContinue)) { return $true }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
 function Remove-PrinterSafe {
     param([string]$Name, [switch]$KeepPort, [switch]$RemoveDriver)
 
@@ -214,7 +239,11 @@ function Remove-PrinterSafe {
 
     Get-PrintJob -PrinterName $Name -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue
     Remove-Printer -Name $Name
-    Write-Ok "Printer '$Name' dihapus."
+    if (Wait-PrinterGone $Name) {
+        Write-Ok "Printer '$Name' dihapus."
+    } else {
+        Write-Warn "Printer '$Name' masih tertahan di Windows (pending deletion), akan hilang setelah restart PC."
+    }
 
     # Hapus port TCP/IP hanya jika tidak dipakai printer lain
     if (-not $KeepPort) {
